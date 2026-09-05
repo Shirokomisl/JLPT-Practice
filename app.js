@@ -13,8 +13,24 @@
   var LEVEL = 'n4';
   var PROFILE_KEY = 'jlpt-practice.profile.v1';
   var PROFILE_VERSION = 1;
+  var SRS_KEY_PREFIX = 'jlpt-srs.' + LEVEL + '.';
   var profile = loadProfile();
   var profileNotice = '';
+  var reviewThreshold = 2;
+
+  var SRS_INTERVALS = {
+    unknown: 1,
+    difficult: 3,
+    known: 7
+  };
+  
+  if (!profile.level || LEVELS.indexOf(profile.level) === -1) {
+    profile.level = LEVELS.length ? LEVELS[0] : 'n4';
+    saveProfile();
+  }
+  loadLevel(profile.level);
+
+  var reviewQueue = [];
   function loadLevel(lv) {
     if (!LEVELS.length || !JLPT[lv]) return;
     LEVEL = lv;
@@ -28,6 +44,29 @@
   }
   if (profile.level && LEVELS.indexOf(profile.level) !== -1) loadLevel(profile.level);
   else prepareQuestionKeys();
+  
+  function getDueCards() {
+    var now = Date.now();
+    var today = new Date(now);
+    today.setHours(0, 0, 0, 0);
+    var todayMs = today.getTime();
+    
+    var result = [];
+    QUESTIONS.forEach(function (q) {
+      var key = questionKey(q);
+      var progress = questionProgress(q);
+      var srs = profile.srsData[key] || { interval: 0, nextReview: 0 };
+      
+      if (srs.nextReview > 0 && srs.nextReview <= todayMs) {
+        var dueAnswers = (progress.answers || 0) - (progress.correct || 0);
+        if (dueAnswers > reviewThreshold) {
+          result.push({ q: q, srs: srs, progress: progress });
+        }
+      }
+    });
+    return result.sort(function (a, b) { return a.srs.nextReview - b.srs.nextReview; });
+  }
+  
   function setLevel(lv) {
     if (lv === LEVEL) return;
     loadLevel(lv);
@@ -96,18 +135,55 @@
   }
   // ---------- offline learning profile ----------
   function newProfile() {
-    return { version: PROFILE_VERSION, level: 'n4', flashKnown: {}, questions: {}, activeQuizzes: {} };
+    return { version: PROFILE_VERSION, level: 'n4', flashKnown: {}, questions: {}, activeQuizzes: {}, srsData: {}, reviewData: {} };
   }
   function plainObject(value) {
     return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   }
   function normalizeProfile(value) {
     var clean = newProfile();
-    if (!value || value.version !== PROFILE_VERSION) return clean;
+    if (!value) return clean;
     clean.level = typeof value.level === 'string' ? value.level : clean.level;
     clean.flashKnown = plainObject(value.flashKnown);
     clean.questions = plainObject(value.questions);
     clean.activeQuizzes = plainObject(value.activeQuizzes);
+    clean.srsData = plainObject(value.srsData);
+    clean.reviewData = plainObject(value.reviewData);
+    
+    if (clean.srsData) {
+      var now = Date.now();
+      var today = new Date();
+      today.setHours(0, 0, 0, 0);
+      var todayMs = today.getTime();
+      Object.keys(clean.srsData).forEach(function (key) {
+        var srs = clean.srsData[key];
+        srs.nextReview = srs.nextReview || 0;
+        if (srs.nextReview < todayMs) {
+          srs.nextReview = 0;
+        }
+      });
+    }
+    
+    // Migrate flashcard keys to include LEVEL prefix
+    Object.keys(clean.flashKnown || {}).forEach(function (key) {
+      if (key.indexOf(':') !== -1 && key.indexOf(LEVEL + ':') !== 0) {
+        var newKey = LEVEL + ':' + key;
+        if (!clean.flashKnown[newKey]) {
+          clean.flashKnown[newKey] = clean.flashKnown[key];
+        }
+        delete clean.flashKnown[key];
+      }
+    });
+    Object.keys(clean.srsData || {}).forEach(function (key) {
+      if (key.indexOf(':') !== -1 && key.indexOf(LEVEL + ':') !== 0) {
+        var newKey = LEVEL + ':' + key;
+        if (!clean.srsData[newKey]) {
+          clean.srsData[newKey] = clean.srsData[key];
+        }
+        delete clean.srsData[key];
+      }
+    });
+    
     return clean;
   }
   function loadProfile() {
@@ -115,17 +191,119 @@
     catch (e) { return newProfile(); }
   }
   function saveProfile() {
-    try { window.localStorage.setItem(PROFILE_KEY, JSON.stringify(profile)); }
-    catch (e) { profileNotice = 'Progress could not be saved in this browser.'; }
+    try {
+      window.localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
+    } catch (e) { 
+      profileNotice = 'Progress could not be saved in this browser.'; 
+    }
   }
   function prepareQuestionKeys() {
-    QUESTIONS.forEach(function (q, i) { q._profileKey = LEVEL + ':' + i; });
+    QUESTIONS.forEach(function (q, i) { 
+      q._profileKey = LEVEL + ':' + i;
+      q._tempKey = LEVEL + ':' + i;
+    });
   }
-  function questionKey(q) { return q._profileKey; }
+  function questionKey(q) { 
+    return q._profileKey || q._tempKey || (q._tempKey = LEVEL + ':' + QUESTIONS.indexOf(q));
+  }
   function flashKey(set, index) { return LEVEL + ':' + set + ':' + index; }
-  function questionProgress(q) { return profile.questions[questionKey(q)] || {}; }
+  function questionProgress(q) { 
+    var key = questionKey(q);
+    var state = profile.questions[key];
+    if (!state) {
+      state = { answers: 0, correct: 0, wrong: 0, needsReview: false };
+      profile.questions[key] = state;
+    }
+    return state; 
+  }
   function countMistakes() {
     return QUESTIONS.filter(function (q) { return !!questionProgress(q).needsReview; }).length;
+  }
+  function countReviewToday() {
+    var now = Date.now();
+    var today = new Date(now);
+    today.setHours(0, 0, 0, 0);
+    var todayMs = today.getTime();
+    
+    var count = 0;
+    QUESTIONS.forEach(function (q) {
+      var key = questionKey(q);
+      var progress = questionProgress(q);
+      var srs = profile.srsData[key] || { interval: 0, nextReview: 0 };
+      
+      if (srs.nextReview > 0 && srs.nextReview <= todayMs) {
+        var dueAnswers = (progress.answers || 0) - (progress.correct || 0);
+        if (dueAnswers > reviewThreshold) {
+          count++;
+        }
+      }
+    });
+    return count;
+  }
+  function questionInterval(q) {
+    var key = questionKey(q);
+    var progress = questionProgress(q);
+    var srs = profile.srsData[key] || { interval: 0, nextReview: 0 };
+    var now = Date.now();
+    
+    if (srs.nextReview > now) return null;
+    return SRS_INTERVALS;
+  }
+  function recordAnswer(result) {
+    var key = questionKey(result.q);
+    var state = profile.questions[key] || { answers: 0, correct: 0, wrong: 0, needsReview: false };
+    state.answers++;
+    if (result.correct) { state.correct++; state.needsReview = false; }
+    else { state.wrong++; state.needsReview = true; }
+    state.lastAnswered = Date.now();
+    profile.questions[key] = state;
+    
+    var srs = profile.srsData[key] || { interval: 0, nextReview: 0 };
+    var today = new Date();
+    today.setHours(0, 0, 0, 0);
+    var todayMs = today.getTime();
+    
+    if (result.correct) {
+      var interval = SRS_INTERVALS.known;
+      srs.interval = interval;
+      srs.nextReview = todayMs + (interval * 24 * 60 * 60 * 1000);
+    } else {
+      srs.interval = 0;
+      srs.nextReview = todayMs + (24 * 60 * 60 * 1000);
+    }
+    profile.srsData[key] = srs;
+    
+    saveProfile();
+  }
+  function markCardKnown(set, index, status) {
+    var key = flashKey(set, index);
+    var today = new Date();
+    today.setHours(0, 0, 0, 0);
+    var todayMs = today.getTime();
+    
+    if (status === 'unknown') {
+      delete profile.flashKnown[key];
+      profile.srsData[key] = {
+        interval: 0,
+        nextReview: todayMs + (24 * 60 * 60 * 1000),
+        lastStatus: 'unknown',
+        lastReview: todayMs
+      };
+    } else {
+      var interval = SRS_INTERVALS[status] || SRS_INTERVALS.known;
+      if (status === 'known') {
+        profile.flashKnown[key] = true;
+      } else {
+        delete profile.flashKnown[key];
+      }
+      profile.srsData[key] = {
+        interval: interval,
+        nextReview: todayMs + (interval * 24 * 60 * 60 * 1000),
+        lastStatus: status,
+        lastReview: todayMs
+      };
+    }
+    saveProfile();
   }
   function countAnswered() {
     return QUESTIONS.filter(function (q) { return (questionProgress(q).answers || 0) > 0; }).length;
@@ -138,15 +316,14 @@
     });
     return known;
   }
-  function recordAnswer(result) {
-    var key = questionKey(result.q);
-    var state = profile.questions[key] || { answers: 0, correct: 0, wrong: 0, needsReview: false };
-    state.answers++;
-    if (result.correct) { state.correct++; state.needsReview = false; }
-    else { state.wrong++; state.needsReview = true; }
-    state.lastAnswered = Date.now();
-    profile.questions[key] = state;
-    saveProfile();
+  function startReviewMode() {
+    var due = getDueCards();
+    if (!due.length) { setView('home'); return; }
+    var qs = due.map(function (item) { return item.q; });
+    quiz = { qs: qs, i: 0, picked: null, locked: false, score: 0, cfg: { mode: 'review' }, label: 'Review due cards · ' + qs.length,
+      results: [], started: Date.now() };
+    saveActiveQuiz();
+    setView('quiz');
   }
   function activeQuiz() { return profile.activeQuizzes[LEVEL]; }
   function saveActiveQuiz() {
@@ -239,26 +416,54 @@
     var tiles = CATS.map(function (c) {
       var n = countByCat(c.key), v = verifiedByCat(c.key);
       var tests = TESTS.filter(function (t) { return t.category === c.key; }).length;
-      var pct = n ? Math.round(100 * v / n) : 0;
+      var catQuestions = QUESTIONS.filter(function(q) { return q.category === c.key; });
+      var catAnswers = catQuestions.reduce(function(acc, q) { return acc + (questionProgress(q).answers || 0); }, 0);
+      var catCorrect = catQuestions.reduce(function(acc, q) { return acc + (questionProgress(q).correct || 0); }, 0);
+      var catPct = catAnswers ? Math.round(100 * catCorrect / catAnswers) : 0;
+      var catColor = catPct >= 80 ? '#1f9d55' : catPct >= 50 ? '#f59e0b' : '#d64545';
       return '<div class="tile" data-cat="' + c.key + '" style="border-top:3px solid ' + c.color + '">' +
-        '<div class="n">' + n + '</div>' +
-        '<div class="t">' + c.jp + ' ' + c.label + ' · ' + tests + ' tests</div>' +
-        '<div class="bar"><i style="width:' + pct + '%"></i></div></div>';
+        '<div class="n">' + catAnswers + '</div>' +
+        '<div class="t">' + c.jp + ' ' + c.label + ' · ' + tests + 'tests</div>' +
+        '<div class="bar"><i style="width:' + catPct + '%;background:linear-gradient(90deg,' + catColor + ',#' + catColor.replace('#', '8') + ')"></i></div></div>';
     }).join('');
     var saved = activeQuiz();
     var totalCards = FC.vocab.length + FC.kanji.length + FC.grammar.length;
     var mistakes = countMistakes();
+    var dueCards = getDueCards();
+    var dueCount = dueCards.length;
+    var stats = TESTS.length ? TESTS.reduce(function(acc, t) { return acc + t.n; }, 0) : TOTAL;
+    var answers = QUESTIONS.reduce(function(acc, q) { return acc + (questionProgress(q).answers || 0); }, 0);
+    var correct = QUESTIONS.reduce(function(acc, q) { return acc + (questionProgress(q).correct || 0); }, 0);
+    var totalAnswers = QUESTIONS.filter(function(q) { return (questionProgress(q).answers || 0) > 0; }).length;
+    var accuracy = totalAnswers ? Math.round(100 * correct / answers) : 0;
+    var streak = (function() {
+      var today = new Date(); today.setHours(0, 0, 0, 0);
+      var d = new Date(today);
+      var s = 0;
+      while (true) {
+        var key = SRS_KEY_PREFIX + d.getTime();
+        if (profile.reviewData[key]) s++;
+        else break;
+        d.setDate(d.getDate() - 1);
+      }
+      return s;
+    })();
+
     var savedText = saved ? 'Resume quiz · question ' + (saved.i + 1) + ' / ' + saved.questionKeys.length : 'No saved quiz';
 
     app.innerHTML =
       '<div class="card">' +
         '<h2>Your progress</h2>' +
         '<div class="stat"><span class="k">Questions answered</span><span class="v">' + countAnswered() + ' / ' + TOTAL + '</span></div>' +
-        '<div class="stat"><span class="k">Needs review</span><span class="v">' + mistakes + '</span></div>' +
+        '<div class="stat"><span class="k">Mistakes to review</span><span class="v">' + mistakes + '</span></div>' +
+        '<div class="stat"><span class="k">Due cards today</span><span class="v">' + dueCount + '</span></div>' +
+        '<div class="stat"><span class="k">Accuracy</span><span class="v">' + accuracy + '%</span></div>' +
+        '<div class="stat"><span class="k">Series</span><span class="v">' + streak + ' days</span></div>' +
         '<div class="stat"><span class="k">Known flashcards</span><span class="v">' + countKnownCards() + ' / ' + totalCards + '</span></div>' +
         '<div class="row" style="margin-top:1rem">' +
           '<button class="btn" id="resumeBtn" ' + (saved ? '' : 'disabled') + '>' + esc(savedText) + '</button>' +
           '<button class="btn ghost" id="mistakesBtn" ' + (mistakes ? '' : 'disabled') + '>Review mistakes (' + mistakes + ')</button>' +
+          '<button class="btn ghost" id="dueBtn" ' + (dueCount ? '' : 'disabled') + '>Review due (' + dueCount + ')</button>' +
         '</div>' +
         '<div class="row" style="margin-top:.7rem">' +
           '<button class="btn ghost" id="exportBtn">Download backup</button>' +
@@ -269,10 +474,30 @@
       '</div>' +
       '<div class="card">' +
         '<h2>Ready to study? 📚</h2>' +
-        '<p class="sub" style="margin-top:.2rem">' + TOTAL + ' practice questions in 4 categories — every answer ' +
-        'was checked against the source answer key (' + VERIFIED + '/' + TOTAL + ' auto-verified, rest confirmed by hand). ' +
-        'Pick a category to see the tests, or jump straight in with “Test me”.</p>' +
+        '<p class="sub" style="margin-top:.2rem">' + stats + ' practice questions in 4 categories — every answer ' +
+        'was checked against the source answer key (' + VERIFIED + '/' + stats + ' auto-verified, rest confirmed by hand). ' +
+        'Pick a category to see the tests, or jump straight in with "Test me".</p>' +
         '<div class="grid" style="margin-top:1rem">' + tiles + '</div>' +
+      '</div>' +
+      '<div class="card">' +
+        '<h2>Category progress</h2>' +
+        CATS.map(function(c) {
+          var catQuestions = QUESTIONS.filter(function(q) { return q.category === c.key; });
+          var totalCat = catQuestions.length;
+          var catAnswers = catQuestions.reduce(function(acc, q) { return acc + (questionProgress(q).answers || 0); }, 0);
+          var catCorrect = catQuestions.reduce(function(acc, q) { return acc + (questionProgress(q).correct || 0); }, 0);
+          var pct = catAnswers ? Math.round(100 * catCorrect / catAnswers) : 0;
+          var known = catQuestions.filter(function(q) { return (questionProgress(q).answers || 0) > 0; }).length;
+          var dueCat = countReviewTodayByCat(c.key);
+          return '<div class="statchart">' +
+            '<div class="statchart-row">' +
+              '<span class="statchart-label">' + c.label + '</span>' +
+              '<span class="v">' + pct + '% (' + known + '/' + totalCat + ')</span>' +
+            '</div>' +
+            '<div class="statchart-bar"><i style="width:' + pct + '%"></i></div>' +
+            '<div class="hint">' + dueCat + ' cards due</div>' +
+          '</div>';
+        }).join('') +
       '</div>' +
       '<div class="card">' +
         '<h2>How it works</h2>' +
@@ -281,6 +506,7 @@
         '<div class="stat"><span class="k">Instant feedback</span><span class="pill ok">✓ correct / ✗ wrong</span></div>' +
         '<div class="stat"><span class="k">Why it is right</span><span class="v">completed sentence + explanation</span></div>' +
         '<div class="stat"><span class="k">Study flashcards</span><span class="v">Study → vocab / kanji / grammar</span></div>' +
+        '<div class="stat"><span class="k">Spaced repetition</span><span class="v">Cards review due based on SRS intervals</span></div>' +
       '</div>';
 
     Array.prototype.forEach.call(app.querySelectorAll('.tile'), function (t) {
@@ -290,9 +516,32 @@
       if (restoreActiveQuiz()) setView('quiz');
     });
     document.getElementById('mistakesBtn').addEventListener('click', function () { startQuiz({ mode: 'mistakes', category: 'all' }); });
+    document.getElementById('dueBtn').addEventListener('click', function () { startReviewMode(); });
     document.getElementById('exportBtn').addEventListener('click', downloadProfile);
     document.getElementById('importBtn').addEventListener('click', function () { document.getElementById('importInput').click(); });
     document.getElementById('importInput').addEventListener('change', function () { importProfile(this.files && this.files[0]); });
+  }
+  
+  function countReviewTodayByCat(cat) {
+    var now = Date.now();
+    var today = new Date(now);
+    today.setHours(0, 0, 0, 0);
+    var todayMs = today.getTime();
+    
+    var count = 0;
+    QUESTIONS.filter(function(q) { return q.category === cat; }).forEach(function (q) {
+      var key = questionKey(q);
+      var progress = questionProgress(q);
+      var srs = profile.srsData[key] || { interval: 0, nextReview: 0 };
+      
+      if (srs.nextReview > 0 && srs.nextReview <= todayMs) {
+        var dueAnswers = (progress.answers || 0) - (progress.correct || 0);
+        if (dueAnswers > reviewThreshold) {
+          count++;
+        }
+      }
+    });
+    return count;
   }
 
   // ================= QUIZ SETUP =================
@@ -455,6 +704,7 @@
         var correct = quiz.picked === q.answer;
         if (correct) quiz.score++;
         quiz.results.push({ q: q, picked: quiz.picked, correct: correct });
+        recordAnswer({ q: q, correct: correct });
         Array.prototype.forEach.call(optsBox.querySelectorAll('.opt'), function (x) {
           var v = parseInt(x.getAttribute('data-v'), 10);
           if (v === q.answer) x.classList.add('correct');
@@ -476,6 +726,7 @@
         quiz.i++;
         quiz.picked = null;
         quiz.locked = false;
+        saveActiveQuiz();
         renderQuiz();
       }
     });
@@ -574,6 +825,19 @@
     if (flash.set === 'kanji') return { f: card.front, b: (card.back ? card.back : '') + (card.meaning ? ' · ' + card.meaning : ''), sub: 'base: ' + card.char };
     return { f: card.front, b: card.back, sub: card.id ? ('id: ' + card.id) : '' };
   }
+  function flashGetKey(index) { return flashKey(flash.set, index); }
+  function flashIsKnown(index) { return !!profile.flashKnown[flashGetKey(index)]; }
+  function flashGetSrsStatus(index) { return profile.srsData[flashGetKey(index)]; }
+  function flashGetSrsStatusText(srs) {
+    if (!srs || !srs.nextReview) return '';
+    var now = Date.now();
+    if (srs.nextReview <= now) return 'Due today';
+    var days = Math.round((srs.nextReview - now) / (24 * 60 * 60 * 1000));
+    if (days === 1) return 'Due tomorrow';
+    if (days < 7) return days + ' days';
+    var weeks = Math.floor(days / 7);
+    return weeks + (weeks === 1 ? ' week' : ' weeks') + ' left';
+  }
   function renderFlash() {
     var deck = currentDeck();
     if (!deck.length) { document.getElementById('fcMount').innerHTML = '<div class="empty">No cards.</div>'; return; }
@@ -582,36 +846,52 @@
     if (flash.i >= order.length) flash.i = 0;
     var card = deck[order[flash.i]];
     var fb = flashFrontBack(card);
-    var isKnown = !!flash.known[flash.set + ':' + order[flash.i]];
+    var key = flashKey(flash.set, order[flash.i]);
+    var profileState = profile.srsData[key] || {};
+    var isKnown = !!profile.flashKnown[key];
+    var dueText = flashGetSrsStatusText(profileState);
+    
     document.getElementById('fcMount').innerHTML =
       '<div class="card fcwrap">' +
-        '<div class="meter">Card ' + (flash.i + 1) + ' / ' + deck.length +
-        (isKnown ? ' &nbsp;<span class="pill ok">known</span>' : '') + '</div>' +
+        '<div class="meter">Card ' + (flash.i + 1) + ' / ' + deck.length + (isKnown ? ' &nbsp;<span class="pill ok">known</span>' : '') + '</div>' +
         '<div class="fc' + (flash._flipped ? ' flip' : '') + '" id="fc" style="margin-top:.8rem">' +
           '<div class="face front"><div><div class="txt">' + esc(fb.f) + '</div><div class="sub2">tap to reveal</div></div></div>' +
           '<div class="face back"><div><div class="txt">' + esc(fb.b) + '</div><div class="sub2">' + esc(fb.sub) + '</div></div></div>' +
         '</div>' +
         '<div class="knownrow">' +
           '<button class="btn ghost" id="prevBtn">← Prev</button>' +
-          '<button class="btn ghost g' + (isKnown ? ' known' : '') + '" id="knownBtn">' + (isKnown ? '✓ known (undo)' : 'Mark known') + '</button>' +
+          '<div style="display:flex;gap:.5rem">' +
+            '<button class="btn ghost srs-btn" data-s="unknown">✗ Не помню</button>' +
+            '<button class="btn ghost srs-btn" data-s="difficult">Сложно</button>' +
+            '<button class="btn srs-btn known-btn" data-s="known">✓ Знаю</button>' +
+          '</div>' +
           '<button class="btn" id="nextBtn">Next →</button>' +
         '</div>' +
         '<div class="row" style="justify-content:center;margin-top:.7rem">' +
           '<button class="btn ghost" id="shuffleBtn">🔀 Shuffle</button>' +
         '</div>' +
-      '</div>';
+        (dueText ? '<p class="hint" style="margin-top:.5rem">' + dueText + '</p>' : '');
     document.getElementById('fc').addEventListener('click', function () { flash._flipped = !flash._flipped; this.classList.toggle('flip', flash._flipped); });
     document.getElementById('prevBtn').addEventListener('click', function () { flash.i = (flash.i - 1 + order.length) % order.length; flash._flipped = false; renderFlash(); });
     document.getElementById('nextBtn').addEventListener('click', function () { flash.i = (flash.i + 1) % order.length; flash._flipped = false; renderFlash(); });
     document.getElementById('shuffleBtn').addEventListener('click', function () { flash.order = shuffle(deck.map(function (_, i) { return i; })); flash.i = 0; flash._flipped = false; renderFlash(); });
-    document.getElementById('knownBtn').addEventListener('click', function () {
-      var key = flash.set + ':' + order[flash.i];
-      flash.known[key] = !flash.known[key];
-      // Сохраняем изменения в профиле
-      profile.flashKnown[key] = flash.known[key];
-      saveProfile();
-      renderFlash();
+    Array.prototype.forEach.call(document.querySelectorAll('.srs-btn'), function (btn) {
+      btn.addEventListener('click', function () {
+        var status = this.getAttribute('data-s');
+        markCardKnown(flash.set, order[flash.i], status);
+        renderFlash();
+      });
     });
+  }
+  
+  function getDueDate(nextReview) {
+    var now = Date.now();
+    if (nextReview <= now) return 'Today';
+    var days = Math.round((nextReview - now) / (24 * 60 * 60 * 1000));
+    if (days === 1) return 'Tomorrow';
+    if (days < 7) return days + ' days';
+    var weeks = Math.floor(days / 7);
+    return weeks + (weeks === 1 ? ' week' : ' weeks');
   }
 
   // ================= ROUTER =================
