@@ -533,7 +533,11 @@
 
   // ================= STUDY / FLASHCARDS =================
   function renderStudy() {
-    if (!flash) flash = { set: 'vocab', i: 0, order: [], known: {} };
+    if (!flash) {
+      flash = { set: 'vocab', i: 0, order: [], known: profile.flashKnown || {} };
+      // Сохраняем инициализированные данные в localStorage при первом запуске
+      saveProfile();
+    }
     var sets = [
       { k: 'vocab', label: 'Vocabulary', jp: '語彙', n: FC.vocab.length },
       { k: 'kanji', label: 'Kanji', jp: '漢字', n: FC.kanji.length },
@@ -603,6 +607,9 @@
     document.getElementById('knownBtn').addEventListener('click', function () {
       var key = flash.set + ':' + order[flash.i];
       flash.known[key] = !flash.known[key];
+      // Сохраняем изменения в профиле
+      profile.flashKnown[key] = flash.known[key];
+      saveProfile();
       renderFlash();
     });
   }
