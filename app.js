@@ -24,10 +24,19 @@
     known: 7
   };
   
+  var EXAM_CONFIG = {
+    defaultTimePerQuestion: 90,
+    totalQuestions: 20,
+    showAnswers: false
+  };
+  
   if (!profile.level || LEVELS.indexOf(profile.level) === -1) {
     profile.level = LEVELS.length ? LEVELS[0] : 'n4';
     saveProfile();
   }
+  if (!profile.srsData) profile.srsData = {};
+  if (!profile.reviewData) profile.reviewData = {};
+  if (!profile.activeExams) profile.activeExams = {};
   loadLevel(profile.level);
 
   var reviewQueue = [];
@@ -95,6 +104,7 @@
   var view = 'home';
   var quiz = null;
   var flash = null;
+  var exam = null;
 
   // level selector UI in the header (N3/N4/N5). Hidden if data lacks multiple levels.
   (function () {
@@ -135,7 +145,7 @@
   }
   // ---------- offline learning profile ----------
   function newProfile() {
-    return { version: PROFILE_VERSION, level: 'n4', flashKnown: {}, questions: {}, activeQuizzes: {}, srsData: {}, reviewData: {} };
+    return { version: PROFILE_VERSION, level: 'n4', flashKnown: {}, questions: {}, activeQuizzes: {}, activeExams: {}, srsData: {}, reviewData: {} };
   }
   function plainObject(value) {
     return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -147,6 +157,7 @@
     clean.flashKnown = plainObject(value.flashKnown);
     clean.questions = plainObject(value.questions);
     clean.activeQuizzes = plainObject(value.activeQuizzes);
+    clean.activeExams = plainObject(value.activeExams);
     clean.srsData = plainObject(value.srsData);
     clean.reviewData = plainObject(value.reviewData);
     
@@ -325,11 +336,28 @@
     saveActiveQuiz();
     setView('quiz');
   }
+  function startExamMode(cfg) {
+    var pool = QUESTIONS.slice();
+    if (cfg.category && cfg.category !== 'all') pool = pool.filter(function (q) { return q.category === cfg.category; });
+    var totalQuestions = cfg.count || EXAM_CONFIG.totalQuestions;
+    var qs = shuffle(pool).slice(0, Math.min(totalQuestions, pool.length));
+    qs = qs.sort(function (a, b) { return a.id - b.id; });
+    var cfgWithDefaults = {
+      category: cfg.category || 'all',
+      count: totalQuestions,
+      timeLimit: cfg.timeLimit || 1800,
+      showAnswers: false
+    };
+    exam = { qs: qs, i: 0, picked: null, locked: false, score: 0, cfg: cfgWithDefaults,
+      label: 'Exam · ' + (cfgWithDefaults.category === 'all' ? 'Mixed' : CATMAP[cfgWithDefaults.category].label) + ' · ' + qs.length + 'q',
+      results: [], started: Date.now(), timeLimit: cfgWithDefaults.timeLimit, timeLeft: cfgWithDefaults.timeLimit };
+    saveActiveExam();
+    setView('exam');
+  }
   function activeQuiz() { return profile.activeQuizzes[LEVEL]; }
+  function activeExam() { return profile.activeExams[LEVEL]; }
   function saveActiveQuiz() {
     if (!quiz || quiz.i >= quiz.qs.length) return;
-    // Only persist completed questions. A refresh after checking an answer
-    // simply repeats that one question instead of counting it twice.
     var finished = quiz.results.slice(0, quiz.i);
     profile.activeQuizzes[LEVEL] = {
       version: 1, level: LEVEL, cfg: quiz.cfg, label: quiz.label,
@@ -339,8 +367,22 @@
     };
     saveProfile();
   }
+  function saveActiveExam() {
+    if (!exam) return;
+    var finished = exam.results.slice(0, exam.i);
+    profile.activeExams[LEVEL] = {
+      version: 1, level: LEVEL, cfg: exam.cfg, label: exam.label,
+      questionKeys: exam.qs.map(questionKey), i: exam.i,
+      results: finished.map(function (r) { return { key: questionKey(r.q), picked: r.picked, correct: r.correct }; }),
+      started: exam.started, timeLimit: exam.timeLimit, timeLeft: exam.timeLeft
+    };
+    saveProfile();
+  }
   function clearActiveQuiz() {
     if (profile.activeQuizzes[LEVEL]) { delete profile.activeQuizzes[LEVEL]; saveProfile(); }
+  }
+  function clearActiveExam() {
+    if (profile.activeExams[LEVEL]) { delete profile.activeExams[LEVEL]; saveProfile(); }
   }
   function restoreActiveQuiz() {
     var saved = activeQuiz();
@@ -358,6 +400,24 @@
       score: results.filter(function (r) { return r.correct; }).length,
       cfg: saved.cfg || {}, label: saved.label || 'Saved quiz', results: results,
       started: saved.started || Date.now() };
+    return true;
+  }
+  function restoreActiveExam() {
+    var saved = activeExam();
+    if (!saved || saved.version !== 1 || !Array.isArray(saved.questionKeys)) return false;
+    var byKey = {};
+    QUESTIONS.forEach(function (q) { byKey[questionKey(q)] = q; });
+    var qs = saved.questionKeys.map(function (key) { return byKey[key]; });
+    if (!qs.length || qs.some(function (q) { return !q; }) || saved.i < 0 || saved.i >= qs.length) {
+      clearActiveExam(); return false;
+    }
+    var results = (Array.isArray(saved.results) ? saved.results : []).map(function (r) {
+      return { q: byKey[r.key], picked: r.picked, correct: !!r.correct };
+    }).filter(function (r) { return !!r.q; });
+    exam = { qs: qs, i: saved.i, picked: null, locked: false,
+      score: results.filter(function (r) { return r.correct; }).length,
+      cfg: saved.cfg || {}, label: saved.label || 'Saved exam', results: results,
+      started: saved.started || Date.now(), timeLimit: saved.timeLimit || 1800, timeLeft: saved.timeLeft || 1800 };
     return true;
   }
   function downloadProfile() {
@@ -406,8 +466,8 @@
   nav.addEventListener('click', function (e) {
     var b = e.target.closest('button'); if (!b) return;
     var v = b.getAttribute('data-view');
-    // "Test me" / "Study" from the nav always start fresh (drop a finished quiz state)
     if (v === 'quiz' || v === 'study') { quiz = null; }
+    else if (v === 'exam') { exam = null; }
     setView(v);
   });
 
@@ -900,7 +960,321 @@
       (FC.vocab.length + FC.kanji.length + FC.grammar.length) + ' flashcards';
     if (view === 'home') renderHome();
     else if (view === 'quiz') { quiz ? renderQuiz() : renderQuizSetup(); }
+    else if (view === 'exam') { exam ? renderExam() : renderExamSetup(); }
     else if (view === 'study') renderStudy();
   }
   render();
+
+// ================= EXAM MODE =================
+  function renderExamSetup() {
+    app.innerHTML =
+      '<div class="card">' +
+        '<h2>Exam mode ⏱️</h2>' +
+        '<p class="sub">Timed exam with fixed questions, no instant feedback.</p>' +
+        '<div class="seg" id="examModeSeg" style="margin-top:.9rem">' +
+          '<button data-m="mixed" class="active">Mixed</button>' +
+          '<button data-m="category">Category</button>' +
+        '</div>' +
+        '<div class="row" style="margin-top:1rem">' +
+          '<label>Questions</label>' +
+          '<select id="examCount">' +
+            '<option value="10">10</option><option value="20" selected>20</option>' +
+            '<option value="30">30</option><option value="50">50</option>' +
+          '</select>' +
+        '</div>' +
+        '<div class="row" style="margin-top:.8rem">' +
+          '<label>Time limit</label>' +
+          '<select id="examTime">' +
+            '<option value="600">10 minutes</option>' +
+            '<option value="1200">20 minutes</option>' +
+            '<option value="1800" selected>30 minutes</option>' +
+            '<option value="2700">45 minutes</option>' +
+            '<option value="3600">60 minutes</option>' +
+          '</select>' +
+        '</div>' +
+        '<div class="row" style="margin-top:1rem">' +
+          '<label id="catLabel" style="display:none">Category</label>' +
+          '<select id="examCat" style="display:none"></select>' +
+        '</div>' +
+        '<div class="row" style="margin-top:1.1rem">' +
+          '<button class="btn" id="startExamBtn">Start exam</button>' +
+          '<button class="btn ghost" id="resumeExamBtn">Resume</button>' +
+          '<button class="btn ghost" data-act="home">Back</button>' +
+        '</div>' +
+        '<p class="hint" id="examHint"></p>' +
+      '</div>';
+
+    var examCat = document.getElementById('examCat');
+    examCat.innerHTML = '<option value="all">All categories</option>' +
+      CATS.map(function (c) { return '<option value="' + c.key + '">' + c.label + ' (' + c.jp + ')</option>'; }).join('');
+    
+    var examHint = document.getElementById('examHint');
+    
+    document.getElementById('examModeSeg').addEventListener('click', function (e) {
+      var b = e.target.closest('button'); if (!b) return;
+      var mode = b.getAttribute('data-m');
+      Array.prototype.forEach.call(this.querySelectorAll('button'), function (x) {
+        x.classList.toggle('active', x === b);
+      });
+      var showCat = mode === 'category';
+      document.getElementById('catLabel').style.display = showCat ? '' : 'none';
+      examCat.style.display = showCat ? '' : 'none';
+      if (showCat) {
+        var cat = examCat.value;
+        var pool = cat === 'all' ? TOTAL : countByCat(cat);
+        examHint.textContent = 'Random ' + document.getElementById('examCount').value + ' questions from ' +
+          (cat === 'all' ? 'all categories' : CATMAP[cat].label) + ' (' + pool + ' available).';
+      } else {
+        examHint.textContent = 'Random ' + document.getElementById('examCount').value + ' questions from all categories.';
+      }
+    });
+    
+    document.getElementById('examCount').addEventListener('change', function () {
+      var cat = document.getElementById('examCat').value;
+      var pool = cat === 'all' ? TOTAL : countByCat(cat);
+      examHint.textContent = 'Random ' + this.value + ' questions from ' +
+        (cat === 'all' ? 'all categories' : CATMAP[cat].label) + ' (' + pool + ' available).';
+    });
+    
+    examCat.addEventListener('change', function () {
+      var cat = this.value;
+      var pool = cat === 'all' ? TOTAL : countByCat(cat);
+      examHint.textContent = 'Random ' + document.getElementById('examCount').value + ' questions from ' +
+        (cat === 'all' ? 'all categories' : CATMAP[cat].label) + ' (' + pool + ' available).';
+    });
+
+    app.querySelector('[data-act="home"]').addEventListener('click', function () { setView('home'); });
+    
+    var saved = activeExam();
+    if (saved) {
+      document.getElementById('resumeExamBtn').style.display = '';
+      document.getElementById('resumeExamBtn').addEventListener('click', function () {
+        if (restoreActiveExam()) setView('exam');
+      });
+    } else {
+      document.getElementById('resumeExamBtn').style.display = 'none';
+    }
+    
+    document.getElementById('startExamBtn').addEventListener('click', function () {
+      var isCategory = document.getElementById('examModeSeg').querySelector('.active').getAttribute('data-m') === 'category';
+      var cat = isCategory ? document.getElementById('examCat').value : null;
+      startExamMode({
+        category: cat,
+        count: parseInt(document.getElementById('examCount').value, 10),
+        timeLimit: parseInt(document.getElementById('examTime').value, 10)
+      });
+    });
+  }
+
+  function renderExam() {
+    if (!exam) return renderExamSetup();
+    if (exam.i >= exam.qs.length) return renderExamResults();
+    
+    var q = exam.qs[exam.i];
+    var pct = Math.round(100 * (exam.i) / exam.qs.length);
+    
+    function formatTime(seconds) {
+      var m = Math.floor(seconds / 60);
+      var s = seconds % 60;
+      return m + ':' + (s < 10 ? '0' : '') + s;
+    }
+    
+    var timeLeft = exam.timeLeft > 0 ? exam.timeLeft : 0;
+    
+    var opts = q.options.map(function (o) {
+      return '<div class="opt' + (exam && exam.locked ? ' dim' : '') + '" data-v="' + o.v + '" role="radio" aria-checked="false">' +
+        '<span class="mark">' + o.v + '</span><span class="txt">' + esc(o.text) + '</span></div>';
+    }).join('');
+    
+    app.innerHTML =
+      '<div class="card qcard">' +
+        '<div class="meter"><b>' + esc(exam.label) + '</b> &nbsp;·&nbsp; Question ' + (exam.i + 1) + ' / ' + exam.qs.length +
+        ' &nbsp;·&nbsp; <span class="pill dim">' + esc(q.category) + '</span> &nbsp;·&nbsp; <span class="icon">⏱ ' + formatTime(timeLeft) + '</span></div>' +
+        '<div class="progress"><i style="width:' + pct + '%"></i></div>' +
+        (q.context ? '<div class="passage">' + esc(q.context) + '</div>' : '') +
+        (q.image ? '<div class="diagram"><a href="' + esc(q.image) + '" target="_blank" rel="noopener"><img src="' + esc(q.image) + '" alt="diagram" loading="lazy"></a></div>' : '') +
+        '<div class="qstem">' + fmtStem(q.stem) + '</div>' +
+        '<div id="opts" role=" radiogroup" aria-label="Answers">' + opts + '</div>' +
+        '<div class="explain" id="ex"></div>' +
+        '<div class="row spread" style="margin-top:.9rem">' +
+          '<button class="btn ghost" data-act="home">Quit</button>' +
+          '<button class="btn" id="actBtn" ' + (exam.locked ? '' : 'disabled') + '>Check answer</button>' +
+        '</div>' +
+      '</div>';
+
+    var optsBox = document.getElementById('opts');
+    var actBtn = document.getElementById('actBtn');
+    
+    optsBox.addEventListener('keydown', function (e) {
+      if (exam.locked) return;
+      if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        var all = optsBox.querySelectorAll('.opt');
+        var curr = optsBox.querySelector('.opt.sel');
+        var idx = curr ? Array.prototype.indexOf.call(all, curr) : -1;
+        if (idx < 0 || idx >= all.length - 1) optsBox.querySelector('.opt').click();
+        else all[idx + 1].click();
+      } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+        e.preventDefault();
+        var all = optsBox.querySelectorAll('.opt');
+        var curr = optsBox.querySelector('.opt.sel');
+        var idx = curr ? Array.prototype.indexOf.call(all, curr) : -1;
+        if (idx <= 0) all[all.length - 1].click();
+        else all[idx - 1].click();
+      } else if (e.key === 'Enter' && !exam.locked) {
+        actBtn.click();
+      }
+    });
+    
+    Array.prototype.forEach.call(optsBox.querySelectorAll('.opt'), function (el) {
+      el.addEventListener('click', function () {
+        if (exam.locked) return;
+        exam.picked = parseInt(el.getAttribute('data-v'), 10);
+        Array.prototype.forEach.call(optsBox.querySelectorAll('.opt'), function (x) {
+          x.classList.toggle('sel', x === el);
+          x.setAttribute('aria-checked', x === el ? 'true' : 'false');
+        });
+        actBtn.disabled = false;
+      });
+      el.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          el.click();
+        }
+      });
+    });
+    
+    var timeInterval = setInterval(function () {
+      if (exam && exam.timeLeft > 0) {
+        exam.timeLeft--;
+        var el = document.querySelector('.meter .icon');
+        if (el) el.textContent = '⏱ ' + formatTime(exam.timeLeft);
+      } else if (exam && exam.timeLeft <= 0) {
+        clearInterval(timeInterval);
+        exam.locked = true;
+        exam.i = exam.qs.length;
+        renderExamResults();
+      }
+    }, 1000);
+    
+    actBtn.addEventListener('click', function () {
+      if (!exam.locked) {
+        if (exam.picked == null) return;
+        exam.locked = true;
+        clearInterval(timeInterval);
+        var correct = exam.picked === q.answer;
+        if (correct) exam.score++;
+        exam.results.push({ q: q, picked: exam.picked, correct: correct });
+        recordAnswer({ q: q, correct: correct });
+        Array.prototype.forEach.call(optsBox.querySelectorAll('.opt'), function (x) {
+          var v = parseInt(x.getAttribute('data-v'), 10);
+          x.classList.add('dim');
+          if (v === q.answer) x.classList.add('correct');
+          else if (v === exam.picked) x.classList.add('wrong');
+        });
+        var ansTxt = q.options.filter(function (o) { return o.v === q.answer; })[0].text;
+        var ex = document.getElementById('ex');
+        var html = '<span class="a">' + (correct ? '✓ Correct!' : '✗ Not quite.') +
+          ' Answer: ' + q.answer + ' — ' + esc(ansTxt) + '</span>';
+        if (q.marked) html += '<br><span class="frag">Correct fragment: ' + esc(q.marked) + '</span>';
+        if (q.answer_sentence) html += '<br><span class="hint">Completed: ' + esc(q.answer_sentence) + '</span>';
+        if (q.verified) html += ' &nbsp;<span class="pill ok">✓ key-checked</span>';
+        else html += ' &nbsp;<span class="pill warn">⚑ confirmed by hand</span>';
+        ex.innerHTML = html;
+        ex.classList.add('show');
+        actBtn.textContent = (exam.i + 1 < exam.qs.length) ? 'Next question →' : 'See results →';
+      } else {
+        exam.i++;
+        exam.picked = null;
+        exam.locked = false;
+        saveActiveExam();
+        renderExam();
+      }
+    });
+    
+    app.querySelector('[data-act="home"]').addEventListener('click', function () {
+      clearInterval(timeInterval);
+      exam = null; setView('home');
+    });
+  }
+
+  function renderExamResults() {
+    if (!exam) return renderExamSetup();
+    var n = exam.qs.length;
+    var sc = exam.score;
+    var pct = n ? Math.round(100 * sc / n) : 0;
+    var secs = Math.round((Date.now() - exam.started) / 1000);
+    var msg = pct >= 90 ? 'Excellent — 素晴らしい！ 🎉' : pct >= 70 ? 'Great job! 💪' :
+      pct >= 50 ? 'Good effort — keep going. 📖' : 'Keep practicing — you will get there. 🌱';
+
+    var byCategory = {};
+    CATS.forEach(function (c) { byCategory[c.key] = { total: 0, correct: 0 }; });
+    exam.results.forEach(function (r) {
+      var cat = r.q.category;
+      if (byCategory[cat]) {
+        byCategory[cat].total++;
+        if (r.correct) byCategory[cat].correct++;
+      }
+    });
+
+    var review = exam.results.map(function (r, idx) {
+      var q = r.q;
+      var yourTxt = q.options.filter(function (o) { return o.v === r.picked; })[0].text;
+      var ansTxt = q.options.filter(function (o) { return o.v === q.answer; })[0].text;
+      var _ctx = q.context ? '<div class="passage sm">' + esc(q.context) + '</div>' : '';
+      var _img = q.image ? '<div class="diagram sm"><a href="' + esc(q.image) + '" target="_blank" rel="noopener"><img src="' + esc(q.image) + '" alt="diagram" loading="lazy"></a></div>' : '';
+      return '<div class="mini">' + _ctx + _img +
+        '<div class="st"><span class="ic ' + (r.correct ? 'ok-ic">✓' : 'bad-ic">✗') + '</span> ' +
+        (idx + 1) + '. ' + fmtStem(q.stem) + '</div>' +
+        '<div class="hint">Your answer: ' + esc(yourTxt) +
+        (r.correct ? '' : ' &nbsp;·&nbsp; <b>Correct: ' + esc(ansTxt) + '</b>') + '</div>' +
+        (q.answer_sentence ? '<div class="hint">' + esc(q.answer_sentence) + '</div>' : '') +
+        '</div>';
+    }).join('');
+
+    var catStats = CATS.map(function (c) {
+      var data = byCategory[c.key];
+      var total = data.total || 0;
+      var correct = data.correct || 0;
+      var catPct = total ? Math.round(100 * correct / total) : 0;
+      var catColor = catPct >= 80 ? '#1f9d55' : catPct >= 50 ? '#f59e0b' : '#d64545';
+      return '<div class="statchart">' +
+        '<div class="statchart-row">' +
+          '<span class="statchart-label">' + c.label + '</span>' +
+          '<span class="v">' + catPct + '% (' + correct + '/' + total + ')</span>' +
+        '</div>' +
+        '<div class="statchart-bar"><i style="width:' + catPct + '%;background:' + catColor + '"></i></div>' +
+      '</div>';
+    }).join('');
+
+    app.innerHTML =
+      '<div class="card result">' +
+        '<div class="big">' + sc + ' / ' + n + '</div>' +
+        '<div style="font-size:1.1rem;margin:.2rem 0">' + pct + '% correct</div>' +
+        '<p class="sub">' + msg + ' &nbsp;·&nbsp; ' + secs + 's</p>' +
+        '<div class="row" style="justify-content:center;margin-top:1rem">' +
+          '<button class="btn" id="retryExamBtn">Retry these</button>' +
+          '<button class="btn ghost" id="newExamBtn">New random 20</button>' +
+          '<button class="btn ghost" id="homeBtn">Home</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="card result">' +
+        '<h2>Results by category</h2>' +
+        '<div class="grid" style="margin-top:1rem">' + catStats + '</div>' +
+      '</div>' +
+      '<div class="card review"><h2>Review</h2>' + review + '</div>';
+
+    document.getElementById('retryExamBtn').addEventListener('click', function () {
+      var cfg = exam.cfg; startExamMode(cfg);
+    });
+    document.getElementById('newExamBtn').addEventListener('click', function () {
+      startExamMode({ category: exam.cfg.category, count: 20, timeLimit: 1800 });
+    });
+    document.getElementById('homeBtn').addEventListener('click', function () { exam = null; setView('home'); });
+  }
+
+  if (!window.JLPT_PRACTICE_EXAM_EXPOSED) {
+    window.JLPT_PRACTICE_EXAM_EXPOSED = true;
+    if (window.exposeExamFunctions) exposeExamFunctions({ startExamMode: startExamMode });
+  }
 })();
