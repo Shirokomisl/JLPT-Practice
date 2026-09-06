@@ -327,10 +327,10 @@
     });
     return known;
   }
-  function startReviewMode() {
-    var due = getDueCards();
-    if (!due.length) { setView('home'); return; }
-    var qs = due.map(function (item) { return item.q; });
+   function startReviewMode() {
+    var dueCards = getDueCards();
+    if (!dueCards.length) { setView('home'); return; }
+    var qs = dueCards.map(function (item) { return item.q; });
     quiz = { qs: qs, i: 0, picked: null, locked: false, score: 0, cfg: { mode: 'review' }, label: 'Review due cards · ' + qs.length,
       results: [], started: Date.now() };
     saveActiveQuiz();
