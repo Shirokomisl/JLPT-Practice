@@ -160,20 +160,11 @@
     clean.activeExams = plainObject(value.activeExams);
     clean.srsData = plainObject(value.srsData);
     clean.reviewData = plainObject(value.reviewData);
-    
-    if (clean.srsData) {
-      var now = Date.now();
-      var today = new Date();
-      today.setHours(0, 0, 0, 0);
-      var todayMs = today.getTime();
-      Object.keys(clean.srsData).forEach(function (key) {
-        var srs = clean.srsData[key];
-        srs.nextReview = srs.nextReview || 0;
-        if (srs.nextReview < todayMs) {
-          srs.nextReview = 0;
-        }
-      });
-    }
+
+    Object.keys(clean.srsData).forEach(function (key) {
+      var srs = clean.srsData[key];
+      if (srs && typeof srs === 'object') srs.nextReview = srs.nextReview || 0;
+    });
     
     // Migrate flashcard keys to include LEVEL prefix
     Object.keys(clean.flashKnown || {}).forEach(function (key) {
@@ -327,7 +318,25 @@
     });
     return known;
   }
-   function startReviewMode() {
+  function getDueFlashcards() {
+    var now = Date.now();
+    var today = new Date(now);
+    today.setHours(0, 0, 0, 0);
+    var todayMs = today.getTime();
+    var result = [];
+
+    ['vocab', 'kanji', 'grammar'].forEach(function (set) {
+      var deck = set === 'vocab' ? FC.vocab : set === 'kanji' ? FC.kanji : FC.grammar;
+      deck.forEach(function (card, index) {
+        var srs = profile.srsData[flashKey(set, index)];
+        if (srs && srs.nextReview > 0 && srs.nextReview <= todayMs) {
+          result.push({ set: set, index: index, card: card, srs: srs });
+        }
+      });
+    });
+    return result.sort(function (a, b) { return a.srs.nextReview - b.srs.nextReview; });
+  }
+  function startReviewMode() {
     var dueCards = getDueCards();
     if (!dueCards.length) { setView('home'); return; }
     var qs = dueCards.map(function (item) { return item.q; });
@@ -335,6 +344,12 @@
       results: [], started: Date.now() };
     saveActiveQuiz();
     setView('quiz');
+  }
+  function startFlashReviewMode() {
+    var dueCards = getDueFlashcards();
+    if (!dueCards.length) { setView('home'); return; }
+    flash = { set: dueCards[0].set, i: 0, order: [], dueQueue: dueCards, known: profile.flashKnown || {} };
+    setView('study');
   }
   function startExamMode(cfg) {
     var pool = QUESTIONS.slice();
@@ -466,7 +481,8 @@
   nav.addEventListener('click', function (e) {
     var b = e.target.closest('button'); if (!b) return;
     var v = b.getAttribute('data-view');
-    if (v === 'quiz' || v === 'study') { quiz = null; }
+    if (v === 'quiz') { quiz = null; }
+    else if (v === 'study') { quiz = null; flash = null; }
     else if (v === 'exam') { exam = null; }
     setView(v);
   });
@@ -489,8 +505,10 @@
     var saved = activeQuiz();
     var totalCards = FC.vocab.length + FC.kanji.length + FC.grammar.length;
     var mistakes = countMistakes();
-    var dueCards = getDueCards();
-    var dueCount = dueCards.length;
+    var dueQuestions = getDueCards();
+    var dueQuestionCount = dueQuestions.length;
+    var dueFlashcards = getDueFlashcards();
+    var dueFlashcardCount = dueFlashcards.length;
     var stats = TESTS.length ? TESTS.reduce(function(acc, t) { return acc + t.n; }, 0) : TOTAL;
     var answers = QUESTIONS.reduce(function(acc, q) { return acc + (questionProgress(q).answers || 0); }, 0);
     var correct = QUESTIONS.reduce(function(acc, q) { return acc + (questionProgress(q).correct || 0); }, 0);
@@ -516,14 +534,16 @@
         '<h2>Your progress</h2>' +
         '<div class="stat"><span class="k">Questions answered</span><span class="v">' + countAnswered() + ' / ' + TOTAL + '</span></div>' +
         '<div class="stat"><span class="k">Mistakes to review</span><span class="v">' + mistakes + '</span></div>' +
-        '<div class="stat"><span class="k">Due cards today</span><span class="v">' + dueCount + '</span></div>' +
+        '<div class="stat"><span class="k">Due questions today</span><span class="v">' + dueQuestionCount + '</span></div>' +
+        '<div class="stat"><span class="k">Due flashcards today</span><span class="v">' + dueFlashcardCount + '</span></div>' +
         '<div class="stat"><span class="k">Accuracy</span><span class="v">' + accuracy + '%</span></div>' +
         '<div class="stat"><span class="k">Series</span><span class="v">' + streak + ' days</span></div>' +
         '<div class="stat"><span class="k">Known flashcards</span><span class="v">' + countKnownCards() + ' / ' + totalCards + '</span></div>' +
         '<div class="row" style="margin-top:1rem">' +
           '<button class="btn" id="resumeBtn" ' + (saved ? '' : 'disabled') + '>' + esc(savedText) + '</button>' +
           '<button class="btn ghost" id="mistakesBtn" ' + (mistakes ? '' : 'disabled') + '>Review mistakes (' + mistakes + ')</button>' +
-          '<button class="btn ghost" id="dueBtn" ' + (dueCount ? '' : 'disabled') + '>Review due (' + dueCount + ')</button>' +
+          '<button class="btn ghost" id="dueBtn" ' + (dueQuestionCount ? '' : 'disabled') + '>Review questions (' + dueQuestionCount + ')</button>' +
+          '<button class="btn ghost" id="dueFlashBtn" ' + (dueFlashcardCount ? '' : 'disabled') + '>Study flashcards (' + dueFlashcardCount + ')</button>' +
         '</div>' +
         '<div class="row" style="margin-top:.7rem">' +
           '<button class="btn ghost" id="exportBtn">Download backup</button>' +
@@ -577,6 +597,7 @@
     });
     document.getElementById('mistakesBtn').addEventListener('click', function () { startQuiz({ mode: 'mistakes', category: 'all' }); });
     document.getElementById('dueBtn').addEventListener('click', function () { startReviewMode(); });
+    document.getElementById('dueFlashBtn').addEventListener('click', function () { startFlashReviewMode(); });
     document.getElementById('exportBtn').addEventListener('click', downloadProfile);
     document.getElementById('importBtn').addEventListener('click', function () { document.getElementById('importInput').click(); });
     document.getElementById('importInput').addEventListener('change', function () { importProfile(this.files && this.files[0]); });
@@ -892,28 +913,36 @@
     if (!srs || !srs.nextReview) return '';
     var now = Date.now();
     if (srs.nextReview <= now) return 'Due today';
-    var days = Math.round((srs.nextReview - now) / (24 * 60 * 60 * 1000));
+    var days = Math.max(1, Math.ceil((srs.nextReview - now) / (24 * 60 * 60 * 1000)));
     if (days === 1) return 'Due tomorrow';
     if (days < 7) return days + ' days';
     var weeks = Math.floor(days / 7);
     return weeks + (weeks === 1 ? ' week' : ' weeks') + ' left';
   }
   function renderFlash() {
+    if (flash.dueQueue && !flash.dueQueue.length) {
+      document.getElementById('fcMount').innerHTML = '<div class="empty">All due flashcards reviewed.</div>';
+      return;
+    }
+    var dueItem = flash.dueQueue ? flash.dueQueue[flash.i] : null;
+    if (dueItem) flash.set = dueItem.set;
     var deck = currentDeck();
     if (!deck.length) { document.getElementById('fcMount').innerHTML = '<div class="empty">No cards.</div>'; return; }
-    var order = flash.order.length ? flash.order : deck.map(function (_, i) { return i; });
+    var order = flash.dueQueue ? [] : (flash.order.length ? flash.order : deck.map(function (_, i) { return i; }));
     flash.order = order;
-    if (flash.i >= order.length) flash.i = 0;
-    var card = deck[order[flash.i]];
+    if (!flash.dueQueue && flash.i >= order.length) flash.i = 0;
+    var cardIndex = dueItem ? dueItem.index : order[flash.i];
+    var card = deck[cardIndex];
     var fb = flashFrontBack(card);
-    var key = flashKey(flash.set, order[flash.i]);
+    var key = flashKey(flash.set, cardIndex);
     var profileState = profile.srsData[key] || {};
     var isKnown = !!profile.flashKnown[key];
     var dueText = flashGetSrsStatusText(profileState);
+    var cardCount = flash.dueQueue ? flash.dueQueue.length : deck.length;
     
     document.getElementById('fcMount').innerHTML =
       '<div class="card fcwrap">' +
-        '<div class="meter">Card ' + (flash.i + 1) + ' / ' + deck.length + (isKnown ? ' &nbsp;<span class="pill ok">known</span>' : '') + '</div>' +
+        '<div class="meter">Card ' + (flash.i + 1) + ' / ' + cardCount + (isKnown ? ' &nbsp;<span class="pill ok">known</span>' : '') + '</div>' +
         '<div class="fc' + (flash._flipped ? ' flip' : '') + '" id="fc" style="margin-top:.8rem">' +
           '<div class="face front"><div><div class="txt">' + esc(fb.f) + '</div><div class="sub2">tap to reveal</div></div></div>' +
           '<div class="face back"><div><div class="txt">' + esc(fb.b) + '</div><div class="sub2">' + esc(fb.sub) + '</div></div></div>' +
@@ -927,18 +956,29 @@
           '</div>' +
           '<button class="btn" id="nextBtn">Next →</button>' +
         '</div>' +
-        '<div class="row" style="justify-content:center;margin-top:.7rem">' +
+        '<div class="row" style="justify-content:center;margin-top:.7rem"' + (flash.dueQueue ? ' hidden' : '') + '>' +
           '<button class="btn ghost" id="shuffleBtn">🔀 Shuffle</button>' +
         '</div>' +
         (dueText ? '<p class="hint" style="margin-top:.5rem">' + dueText + '</p>' : '');
     document.getElementById('fc').addEventListener('click', function () { flash._flipped = !flash._flipped; this.classList.toggle('flip', flash._flipped); });
-    document.getElementById('prevBtn').addEventListener('click', function () { flash.i = (flash.i - 1 + order.length) % order.length; flash._flipped = false; renderFlash(); });
-    document.getElementById('nextBtn').addEventListener('click', function () { flash.i = (flash.i + 1) % order.length; flash._flipped = false; renderFlash(); });
-    document.getElementById('shuffleBtn').addEventListener('click', function () { flash.order = shuffle(deck.map(function (_, i) { return i; })); flash.i = 0; flash._flipped = false; renderFlash(); });
+    document.getElementById('prevBtn').addEventListener('click', function () {
+      var count = flash.dueQueue ? flash.dueQueue.length : order.length;
+      flash.i = (flash.i - 1 + count) % count; flash._flipped = false; renderFlash();
+    });
+    document.getElementById('nextBtn').addEventListener('click', function () {
+      var count = flash.dueQueue ? flash.dueQueue.length : order.length;
+      flash.i = (flash.i + 1) % count; flash._flipped = false; renderFlash();
+    });
+    var shuffleBtn = document.getElementById('shuffleBtn');
+    if (shuffleBtn) shuffleBtn.addEventListener('click', function () { flash.order = shuffle(deck.map(function (_, i) { return i; })); flash.i = 0; flash._flipped = false; renderFlash(); });
     Array.prototype.forEach.call(document.querySelectorAll('.srs-btn'), function (btn) {
       btn.addEventListener('click', function () {
         var status = this.getAttribute('data-s');
-        markCardKnown(flash.set, order[flash.i], status);
+        markCardKnown(flash.set, cardIndex, status);
+        if (flash.dueQueue) {
+          flash.dueQueue.splice(flash.i, 1);
+          if (flash.i >= flash.dueQueue.length) flash.i = 0;
+        }
         renderFlash();
       });
     });
@@ -947,7 +987,7 @@
   function getDueDate(nextReview) {
     var now = Date.now();
     if (nextReview <= now) return 'Today';
-    var days = Math.round((nextReview - now) / (24 * 60 * 60 * 1000));
+    var days = Math.max(1, Math.ceil((nextReview - now) / (24 * 60 * 60 * 1000)));
     if (days === 1) return 'Tomorrow';
     if (days < 7) return days + ' days';
     var weeks = Math.floor(days / 7);
