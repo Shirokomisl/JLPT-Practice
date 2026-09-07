@@ -20,6 +20,7 @@
     <button data-view="quiz">Test me</button>
     <button data-view="exam" data-exam="exam">Exam</button>
     <button data-view="study">Study</button>
+    <button id="dataToggle" type="button">Русский</button>
   </nav>
 </header>
 <main id="app"></main>
@@ -28,6 +29,11 @@
   Flashcards: jlptstudy.net (N4 vocab · kanji · grammar) + derived N3/N5
 </footer>
 <script src="data/data.js"></script>
+<script src="data/ru.js"></script>
+<script>
+  window.JLPT_DATA_SOURCE = new URLSearchParams(window.location.search).get('data') === 'ru' ? 'ru' : 'ja';
+  window.JLPT = window.JLPT_JA;
+</script>
 <script src="app.js"></script>
 </body>
 </html>

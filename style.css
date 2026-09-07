@@ -8,7 +8,7 @@
 *{box-sizing:border-box}
 html,body{margin:0}
 body{background:var(--bg);color:var(--ink);
-  font-family:"Hiragino Kaku Gothic ProN","Yu Gothic","Noto Sans JP",system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-family:"Segoe UI","Noto Sans","Yu Gothic","Noto Sans JP",system-ui,-apple-system,Roboto,Helvetica,Arial,sans-serif;
   line-height:1.6;overflow-wrap:anywhere}
 h1{font-size:1.25rem;margin:0}
 h2{font-size:1.4rem;margin:0 0 .5rem}

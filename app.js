@@ -7,6 +7,9 @@
   var TOTAL = (typeof BANK !== 'undefined' ? BANK.total : QUESTIONS.length);
   var VERIFIED = (typeof BANK !== 'undefined' ? BANK.verified : 0);
   var FC = (typeof FLASH !== 'undefined') ? FLASH : { vocab: [], kanji: [], grammar: [] };
+  var RU_MAP = {};
+  var RUSSIAN_MODE = window.JLPT_DATA_SOURCE === 'ru';
+  if (typeof RU_UI !== 'undefined' && typeof RU_UI_EXTRA !== 'undefined') Object.assign(RU_UI, RU_UI_EXTRA);
 
   // ---------- level (N2 / N3 / N4 / N5) ----------
   var LEVELS = (typeof JLPT !== 'undefined' ? Object.keys(JLPT).sort() : []);
@@ -49,6 +52,7 @@
     TOTAL = bk.total != null ? bk.total : QUESTIONS.length;
     VERIFIED = bk.verified || 0;
     FC = JLPT[lv].flash || { vocab: [], kanji: [], grammar: [] };
+    RU_MAP = RUSSIAN_MODE && typeof RU_DATA !== 'undefined' ? (RU_DATA[lv] || {}) : {};
     prepareQuestionKeys();
   }
   if (profile.level && LEVELS.indexOf(profile.level) !== -1) loadLevel(profile.level);
@@ -101,6 +105,7 @@
   var app = document.getElementById('app');
   var nav = document.getElementById('nav');
   var sub = document.getElementById('sub');
+  var dataToggle = document.getElementById('dataToggle');
   var view = 'home';
   var quiz = null;
   var flash = null;
@@ -129,6 +134,32 @@
     return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
     });
+  }
+  function ruText(field, value) {
+    if (!RUSSIAN_MODE || value == null) return value;
+    if (field === 'stem' || field === 'opts' || field === 'marks' || field === 'ans') return value;
+    var map = RU_MAP[field];
+    return map && Object.prototype.hasOwnProperty.call(map, value) ? map[value] : value;
+  }
+  function translateUI(root) {
+    if (!RUSSIAN_MODE || typeof RU_UI === 'undefined' || !root) return;
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    var node;
+    while ((node = walker.nextNode())) {
+      var text = node.nodeValue;
+      var trimmed = text.trim();
+      if (Object.prototype.hasOwnProperty.call(RU_UI, trimmed)) {
+        text = text.replace(trimmed, RU_UI[trimmed]);
+      } else {
+        Object.keys(RU_UI)
+          .sort(function (a, b) { return b.length - a.length; })
+          .forEach(function (key) {
+            var escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            text = text.replace(new RegExp('(^|[^A-Za-z])' + escaped + '(?=$|[^A-Za-z])', 'g'), '$1' + RU_UI[key]);
+          });
+      }
+      node.nodeValue = text;
+    }
   }
   function fmtStem(stem) {
     var s = esc(stem);
@@ -477,15 +508,32 @@
     });
     render();
     window.scrollTo(0, 0);
+    translateUI(nav);
+    translateUI(app);
+    translateUI(document.querySelector('.topbar'));
+    translateUI(document.querySelector('.foot'));
   }
   nav.addEventListener('click', function (e) {
     var b = e.target.closest('button'); if (!b) return;
+    if (b.id === 'dataToggle') return;
     var v = b.getAttribute('data-view');
     if (v === 'quiz') { quiz = null; }
     else if (v === 'study') { quiz = null; flash = null; }
     else if (v === 'exam') { exam = null; }
     setView(v);
   });
+
+  if (dataToggle) {
+    var dataSource = window.JLPT_DATA_SOURCE === 'ru' ? 'ru' : 'ja';
+    dataToggle.textContent = dataSource === 'ru' ? 'English' : 'Русский';
+    dataToggle.title = dataSource === 'ru' ? 'Switch to Japanese data' : 'Переключить на русские данные';
+    dataToggle.addEventListener('click', function () {
+      var url = new URL(window.location.href);
+      if (dataSource === 'ru') url.searchParams.delete('data');
+      else url.searchParams.set('data', 'ru');
+      window.location.href = url.toString();
+    });
+  }
 
   // ================= HOME =================
   function renderHome() {
@@ -748,16 +796,16 @@
     var pct = Math.round(100 * (quiz.i) / quiz.qs.length);
     var opts = q.options.map(function (o) {
       return '<div class="opt" data-v="' + o.v + '">' +
-        '<span class="mark">' + o.v + '</span><span class="txt">' + esc(o.text) + '</span></div>';
+        '<span class="mark">' + o.v + '</span><span class="txt">' + esc(ruText('opts', o.text)) + '</span></div>';
     }).join('');
     app.innerHTML =
       '<div class="card qcard">' +
         '<div class="meter"><b>' + esc(quiz.label) + '</b> &nbsp;·&nbsp; Question ' + (quiz.i + 1) + ' / ' + quiz.qs.length +
         ' &nbsp;·&nbsp; <span class="pill dim">' + esc(q.category) + '</span></div>' +
         '<div class="progress"><i style="width:' + pct + '%"></i></div>' +
-        (q.context ? '<div class="passage">' + esc(q.context) + '</div>' : '') +
+        (q.context ? '<div class="passage">' + esc(ruText('context', q.context)) + '</div>' : '') +
         (q.image ? '<div class="diagram"><a href="' + esc(q.image) + '" target="_blank" rel="noopener"><img src="' + esc(q.image) + '" alt="diagram" loading="lazy"></a></div>' : '') +
-        '<div class="qstem">' + fmtStem(q.stem) + '</div>' +
+        '<div class="qstem">' + fmtStem(ruText('stem', q.stem)) + '</div>' +
         '<div id="opts">' + opts + '</div>' +
         '<div class="explain" id="ex"></div>' +
         '<div class="row spread" style="margin-top:.9rem">' +
@@ -792,12 +840,12 @@
           else if (v === quiz.picked) x.classList.add('wrong');
           else x.classList.add('dim');
         });
-        var ansTxt = q.options.filter(function (o) { return o.v === q.answer; })[0].text;
+        var ansTxt = ruText('opts', q.options.filter(function (o) { return o.v === q.answer; })[0].text);
         var ex = document.getElementById('ex');
         var html = '<span class="a">' + (correct ? '✓ Correct!' : '✗ Not quite.') +
           ' Answer: ' + q.answer + ' — ' + esc(ansTxt) + '</span>';
-        if (q.marked) html += '<br><span class="frag">Correct fragment: ' + esc(q.marked) + '</span>';
-        if (q.answer_sentence) html += '<br><span class="hint">Completed: ' + esc(q.answer_sentence) + '</span>';
+        if (q.marked) html += '<br><span class="frag">Correct fragment: ' + esc(ruText('marks', q.marked)) + '</span>';
+        if (q.answer_sentence) html += '<br><span class="hint">Completed: ' + esc(ruText('ans', q.answer_sentence)) + '</span>';
         if (q.verified) html += ' &nbsp;<span class="pill ok">✓ key-checked</span>';
         else html += ' &nbsp;<span class="pill warn">⚑ confirmed by hand</span>';
         ex.innerHTML = html;
@@ -828,16 +876,16 @@
 
     var review = quiz.results.map(function (r, idx) {
       var q = r.q;
-      var yourTxt = q.options.filter(function (o) { return o.v === r.picked; })[0].text;
-      var ansTxt = q.options.filter(function (o) { return o.v === q.answer; })[0].text;
-      var _ctx = q.context ? '<div class="passage sm">' + esc(q.context) + '</div>' : '';
+      var yourTxt = ruText('opts', q.options.filter(function (o) { return o.v === r.picked; })[0].text);
+      var ansTxt = ruText('opts', q.options.filter(function (o) { return o.v === q.answer; })[0].text);
+      var _ctx = q.context ? '<div class="passage sm">' + esc(ruText('context', q.context)) + '</div>' : '';
       var _img = q.image ? '<div class="diagram sm"><a href="' + esc(q.image) + '" target="_blank" rel="noopener"><img src="' + esc(q.image) + '" alt="diagram" loading="lazy"></a></div>' : '';
       return '<div class="mini">' + _ctx + _img +
         '<div class="st"><span class="ic ' + (r.correct ? 'ok-ic">✓' : 'bad-ic">✗') + '</span> ' +
-        (idx + 1) + '. ' + fmtStem(q.stem) + '</div>' +
+        (idx + 1) + '. ' + fmtStem(ruText('stem', q.stem)) + '</div>' +
         '<div class="hint">Your answer: ' + esc(yourTxt) +
         (r.correct ? '' : ' &nbsp;·&nbsp; <b>Correct: ' + esc(ansTxt) + '</b>') + '</div>' +
-        (q.answer_sentence ? '<div class="hint">' + esc(q.answer_sentence) + '</div>' : '') +
+        (q.answer_sentence ? '<div class="hint">' + esc(ruText('ans', q.answer_sentence)) + '</div>' : '') +
         '</div>';
     }).join('');
 
@@ -902,9 +950,9 @@
     return flash.set === 'vocab' ? FC.vocab : flash.set === 'kanji' ? FC.kanji : FC.grammar;
   }
   function flashFrontBack(card) {
-    if (flash.set === 'vocab') return { f: card.front, b: card.back, sub: (card.type ? card.type : '') + (card.notes ? ' · ' + card.notes : '') };
-    if (flash.set === 'kanji') return { f: card.front, b: (card.back ? card.back : '') + (card.meaning ? ' · ' + card.meaning : ''), sub: 'base: ' + card.char };
-    return { f: card.front, b: card.back, sub: card.id ? ('id: ' + card.id) : '' };
+    if (flash.set === 'vocab') return { f: card.front, b: ruText('vocabBack', card.back), sub: (card.type ? ruText('vocabType', card.type) : '') + (card.notes ? ' · ' + ruText('vocabNotes', card.notes) : '') };
+    if (flash.set === 'kanji') return { f: card.front, b: (card.back ? card.back : '') + (card.meaning ? ' · ' + ruText('kanjiMeaning', card.meaning) : ''), sub: 'base: ' + card.char };
+    return { f: card.front, b: ruText('grammarBack', card.back), sub: card.id ? ('id: ' + ruText('grammarId', card.id)) : '' };
   }
   function flashGetKey(index) { return flashKey(flash.set, index); }
   function flashIsKnown(index) { return !!profile.flashKnown[flashGetKey(index)]; }
@@ -1004,6 +1052,10 @@
     else if (view === 'study') renderStudy();
   }
   render();
+  translateUI(nav);
+  translateUI(app);
+  translateUI(document.querySelector('.topbar'));
+  translateUI(document.querySelector('.foot'));
 
 // ================= EXAM MODE =================
   function renderExamSetup() {
@@ -1123,7 +1175,7 @@
     
     var opts = q.options.map(function (o) {
       return '<div class="opt' + (exam && exam.locked ? ' dim' : '') + '" data-v="' + o.v + '" role="radio" aria-checked="false">' +
-        '<span class="mark">' + o.v + '</span><span class="txt">' + esc(o.text) + '</span></div>';
+        '<span class="mark">' + o.v + '</span><span class="txt">' + esc(ruText('opts', o.text)) + '</span></div>';
     }).join('');
     
     app.innerHTML =
@@ -1131,9 +1183,9 @@
         '<div class="meter"><b>' + esc(exam.label) + '</b> &nbsp;·&nbsp; Question ' + (exam.i + 1) + ' / ' + exam.qs.length +
         ' &nbsp;·&nbsp; <span class="pill dim">' + esc(q.category) + '</span> &nbsp;·&nbsp; <span class="icon">⏱ ' + formatTime(timeLeft) + '</span></div>' +
         '<div class="progress"><i style="width:' + pct + '%"></i></div>' +
-        (q.context ? '<div class="passage">' + esc(q.context) + '</div>' : '') +
+        (q.context ? '<div class="passage">' + esc(ruText('context', q.context)) + '</div>' : '') +
         (q.image ? '<div class="diagram"><a href="' + esc(q.image) + '" target="_blank" rel="noopener"><img src="' + esc(q.image) + '" alt="diagram" loading="lazy"></a></div>' : '') +
-        '<div class="qstem">' + fmtStem(q.stem) + '</div>' +
+        '<div class="qstem">' + fmtStem(ruText('stem', q.stem)) + '</div>' +
         '<div id="opts" role=" radiogroup" aria-label="Answers">' + opts + '</div>' +
         '<div class="explain" id="ex"></div>' +
         '<div class="row spread" style="margin-top:.9rem">' +
@@ -1212,12 +1264,12 @@
           if (v === q.answer) x.classList.add('correct');
           else if (v === exam.picked) x.classList.add('wrong');
         });
-        var ansTxt = q.options.filter(function (o) { return o.v === q.answer; })[0].text;
+        var ansTxt = ruText('opts', q.options.filter(function (o) { return o.v === q.answer; })[0].text);
         var ex = document.getElementById('ex');
         var html = '<span class="a">' + (correct ? '✓ Correct!' : '✗ Not quite.') +
           ' Answer: ' + q.answer + ' — ' + esc(ansTxt) + '</span>';
-        if (q.marked) html += '<br><span class="frag">Correct fragment: ' + esc(q.marked) + '</span>';
-        if (q.answer_sentence) html += '<br><span class="hint">Completed: ' + esc(q.answer_sentence) + '</span>';
+        if (q.marked) html += '<br><span class="frag">Correct fragment: ' + esc(ruText('marks', q.marked)) + '</span>';
+        if (q.answer_sentence) html += '<br><span class="hint">Completed: ' + esc(ruText('ans', q.answer_sentence)) + '</span>';
         if (q.verified) html += ' &nbsp;<span class="pill ok">✓ key-checked</span>';
         else html += ' &nbsp;<span class="pill warn">⚑ confirmed by hand</span>';
         ex.innerHTML = html;
@@ -1259,16 +1311,16 @@
 
     var review = exam.results.map(function (r, idx) {
       var q = r.q;
-      var yourTxt = q.options.filter(function (o) { return o.v === r.picked; })[0].text;
-      var ansTxt = q.options.filter(function (o) { return o.v === q.answer; })[0].text;
-      var _ctx = q.context ? '<div class="passage sm">' + esc(q.context) + '</div>' : '';
+      var yourTxt = ruText('opts', q.options.filter(function (o) { return o.v === r.picked; })[0].text);
+      var ansTxt = ruText('opts', q.options.filter(function (o) { return o.v === q.answer; })[0].text);
+      var _ctx = q.context ? '<div class="passage sm">' + esc(ruText('context', q.context)) + '</div>' : '';
       var _img = q.image ? '<div class="diagram sm"><a href="' + esc(q.image) + '" target="_blank" rel="noopener"><img src="' + esc(q.image) + '" alt="diagram" loading="lazy"></a></div>' : '';
       return '<div class="mini">' + _ctx + _img +
         '<div class="st"><span class="ic ' + (r.correct ? 'ok-ic">✓' : 'bad-ic">✗') + '</span> ' +
-        (idx + 1) + '. ' + fmtStem(q.stem) + '</div>' +
+        (idx + 1) + '. ' + fmtStem(ruText('stem', q.stem)) + '</div>' +
         '<div class="hint">Your answer: ' + esc(yourTxt) +
         (r.correct ? '' : ' &nbsp;·&nbsp; <b>Correct: ' + esc(ansTxt) + '</b>') + '</div>' +
-        (q.answer_sentence ? '<div class="hint">' + esc(q.answer_sentence) + '</div>' : '') +
+        (q.answer_sentence ? '<div class="hint">' + esc(ruText('ans', q.answer_sentence)) + '</div>' : '') +
         '</div>';
     }).join('');
 
